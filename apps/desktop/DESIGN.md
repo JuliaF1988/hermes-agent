@@ -146,6 +146,8 @@ trigger within 300ms opens instantly. The cooldown starts on close, so a
 hover a second later waits again. Close is immediate. `OverflowTip` stays
 on its own longer delay (list titles must not trail while scanning).
 
+**Model search.** Model filters and their highlighted labels treat hyphens, dots, underscores and spaces equivalently. Preserve original label spelling inside marks. The shared highlighter remains literal for other surfaces such as the command palette; model callers explicitly opt in. Model identifier search does not use dictionary spellcheck.
+
 **Keybind hints in tooltips.** On a tipped button bound to a rebindable hotkey,
 use `<TipKeybindLabel actionId="..." />` — it reads the i18n label and the
 current combo from `$bindings`. Pass `text={...}` only when the label is
