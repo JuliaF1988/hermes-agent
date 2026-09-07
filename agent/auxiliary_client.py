@@ -3408,13 +3408,19 @@ def _refresh_nous_credentials() -> bool:
     ))
 
 
-def _refresh_anthropic_credentials() -> bool:
-    from agent.anthropic_credentials import read_claude_code_credentials, _refresh_oauth_token, resolve_anthropic_token
+def _refresh_anthropic_credentials(failed_api_key: str = "") -> bool:
+    from agent.anthropic_credentials import read_claude_code_credentials, _refresh_oauth_token
+    token = failed_api_key
+    if not token:
+        return False
+    pool = load_pool("anthropic")
+    if pool.entry_id_for_api_key(token):
+        return pool.try_refresh_matching(api_key_hint=token) is not None
     creds = read_claude_code_credentials()
-    token = _refresh_oauth_token(creds) if isinstance(creds, dict) and creds.get("refreshToken") else None
-    if not str(token or "").strip():
-        token = resolve_anthropic_token()
-    return bool(str(token or "").strip())
+    # Never spend an ambient login's refresh rotation for another request's key.
+    if isinstance(creds, dict) and creds.get("accessToken") == token and creds.get("refreshToken"):
+        return bool(_refresh_oauth_token(creds))
+    return False
 
 
 def _refresh_xai_oauth_credentials() -> bool:
@@ -3438,21 +3444,21 @@ def _refresh_vertex_credentials() -> bool:
 
 
 # Each refresher returns True when a usable credential exists; the caller then evicts cached clients.
-_CREDENTIAL_REFRESHERS: Dict[str, Callable[[], bool]] = {
+_CREDENTIAL_REFRESHERS: Dict[str, Callable[..., bool]] = {
     "copilot": _refresh_copilot_credentials, "openai-codex": _refresh_codex_credentials,
     "nous": _refresh_nous_credentials, "anthropic": _refresh_anthropic_credentials,
     "xai-oauth": _refresh_xai_oauth_credentials, "vertex": _refresh_vertex_credentials,
 }
 
 
-def _refresh_provider_credentials(provider: str) -> bool:
+def _refresh_provider_credentials(provider: str, *, failed_api_key: str = "") -> bool:
     """Refresh short-lived credentials for OAuth-backed auxiliary providers."""
     normalized = _normalize_aux_provider(provider)
     refresher = _CREDENTIAL_REFRESHERS.get(normalized)
     if refresher is None:
         return False
     try:
-        if not refresher():
+        if not (refresher(failed_api_key) if normalized == "anthropic" else refresher()):
             return False
         _evict_cached_clients(normalized)
         return True
@@ -3645,11 +3651,13 @@ def _plan_fallback_auth_retry(
     destination: _FallbackDestination,
     rebuild: Callable[[str, Any, Optional[str]], Tuple[_FallbackDestination, Dict[str, Any]]], *,
     async_mode: bool,
+    failed_api_key: str = "",
 ) -> Tuple[str, Optional[Tuple[Any, Dict[str, Any], _FallbackDestination]]]:
     """After an auth error on a fallback candidate: refresh credentials and rebuild the request.
     Returns ``(refresh_provider, retry)``; ``retry`` = ``(client, kwargs, destination)`` or None."""
     fb_provider = _auth_refresh_provider_for_route(destination.provider, destination.base_url)
-    if fb_provider not in {"auto", "", None} and _refresh_provider_credentials(fb_provider):
+    refresh_kwargs = {"failed_api_key": failed_api_key} if fb_provider == "anthropic" else {}
+    if fb_provider not in {"auto", "", None} and _refresh_provider_credentials(fb_provider, **refresh_kwargs):
         retry_client, retry_model = _get_cached_client(
             fb_provider, destination.model, **({"async_mode": True} if async_mode else {}),
             base_url=destination.base_url or None, api_mode=destination.api_mode,
@@ -3696,7 +3704,8 @@ def _call_fallback_candidate_sync(
     except Exception as fb_err:
         if not _is_auth_error(fb_err):
             raise
-        fb_provider, retry = _plan_fallback_auth_retry(destination, rebuild, async_mode=False)
+        fb_provider, retry = _plan_fallback_auth_retry(
+            destination, rebuild, async_mode=False, failed_api_key=getattr(fb_client, "api_key", ""))
         if retry is not None:
             try:
                 return _send(*retry)
@@ -3730,7 +3739,8 @@ async def _call_fallback_candidate_async(
     except Exception as fb_err:
         if not _is_auth_error(fb_err):
             raise
-        fb_provider, retry = _plan_fallback_auth_retry(destination, rebuild, async_mode=True)
+        fb_provider, retry = _plan_fallback_auth_retry(
+            destination, rebuild, async_mode=True, failed_api_key=getattr(fb_client, "api_key", ""))
         if retry is not None:
             try:
                 return await _send(*retry)
@@ -6733,7 +6743,9 @@ def _ladder_credential_rungs(
     auth_refresh_provider = _auth_refresh_provider_for_route(resolved_provider, route.base_info)
     if (_is_auth_error(first_err) and auth_refresh_provider not in {"auto", "", None}
             and not client_is_nous):
-        if _refresh_provider_credentials(auth_refresh_provider):
+        refresh_kwargs = ({"failed_api_key": getattr(client, "api_key", "")}
+                          if auth_refresh_provider == "anthropic" else {})
+        if _refresh_provider_credentials(auth_refresh_provider, **refresh_kwargs):
             if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
                 # The stale client is cached under the route label (e.g. "auto"), not the
                 # concrete backend we refreshed.
