@@ -205,7 +205,7 @@ def _restart_systemd_gateway_units_best_effort(failed: list) -> None:
             restart_cmd = list(_cmd) + ["--no-ask-password", "restart", svc_name]
             if _needs_sudo(_scope):
                 restart_cmd = ["sudo", "-n"] + restart_cmd
-            _systemctl(restart_cmd, timeout=30)
+            _systemctl(restart_cmd, timeout=_systemd_restart_timeout(_cmd, svc_name))
 
         _for_each_systemd_gateway_unit(
             result.stdout,
