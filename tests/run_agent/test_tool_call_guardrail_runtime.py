@@ -105,6 +105,103 @@ def test_gateway_platform_uses_hard_stop_default_without_cli_opt_in():
     assert decision.code == "repeated_exact_failure_block"
 
 
+def test_mcp_reuse_contract_prevents_second_runtime_dispatch():
+    tool = "mcp_example__read_finding"
+    args = {"finding_id": "native-7"}
+    agent = _make_agent(tool)
+    agent._tool_guardrails.after_call(
+        tool,
+        args,
+        json.dumps({
+            "result": "grounded summary",
+            "structuredContent": {"reuseResult": True, "findingId": "native-7"},
+        }),
+        failed=False,
+    )
+    msg = SimpleNamespace(
+        content="",
+        tool_calls=[_mock_tool_call(tool, json.dumps(args), "c-reuse")],
+    )
+    messages = []
+
+    with patch("model_tools.handle_function_call") as dispatch:
+        agent._execute_tool_calls_sequential(msg, messages, "task-1")
+
+    dispatch.assert_not_called()
+    assert '"reused": true' in messages[0]["content"]
+    assert agent._force_toolless_final is True
+
+
+def test_capability_only_policy_blocks_investigation_before_dispatch():
+    tool = "mcp_example__list_findings"
+    agent = _make_agent(tool)
+    agent._tool_guardrails.set_capability_only(True)
+    msg = SimpleNamespace(
+        content="",
+        tool_calls=[_mock_tool_call(tool, '{"count": 10}', "c-cap-scope")],
+    )
+    messages = []
+
+    with patch("model_tools.handle_function_call") as dispatch:
+        agent._execute_tool_calls_sequential(msg, messages, "task-1")
+
+    dispatch.assert_not_called()
+    assert '"blockedByTurnPolicy": true' in messages[0]["content"]
+    assert agent._force_toolless_final is True
+
+
+def test_capability_only_policy_allows_capability_read_then_forces_synthesis():
+    tool = "mcp_example__get_capabilities"
+    agent = _make_agent(tool)
+    agent._tool_guardrails.set_capability_only(True)
+    msg = SimpleNamespace(
+        content="",
+        tool_calls=[_mock_tool_call(tool, "{}", "c-cap-read")],
+    )
+    messages = []
+
+    with patch("model_tools.handle_function_call", return_value='{"available": true}') as dispatch:
+        agent._execute_tool_calls_sequential(msg, messages, "task-1")
+
+    dispatch.assert_called_once()
+    assert agent._force_toolless_final is True
+
+
+def test_capability_only_policy_unwraps_tool_search_bridge_target():
+    from agent.tool_guardrails import ToolCallGuardrailController
+
+    controller = ToolCallGuardrailController()
+    controller.set_capability_only(True)
+    decision = controller.before_call(
+        "tool_call",
+        {"name": "mcp_example__investigate_finding", "arguments": {"finding_id": "native-1"}},
+    )
+    assert decision.action == "restrict"
+
+
+def test_vague_recent_bounds_are_applied_before_mcp_dispatch():
+    tool = "mcp_example__list_findings"
+    agent = _make_agent(tool)
+    agent._tool_guardrails.set_vague_recent(True)
+    msg = SimpleNamespace(
+        content="",
+        tool_calls=[_mock_tool_call(tool, json.dumps({
+            "count": 25,
+            "start": "2026-09-06T15:00:00Z",
+            "end": "2026-09-08T15:00:00Z",
+        }), "c-recent-bounds")],
+    )
+
+    with patch("model_tools.handle_function_call", return_value='{"items": []}') as dispatch:
+        agent._execute_tool_calls_sequential(msg, [], "task-1")
+
+    sent = dispatch.call_args.args[1]
+    assert sent["count"] == 10
+    assert sent["start"] == "2026-09-07T15:00:00Z"
+    assert sent["end"] == "2026-09-08T15:00:00Z"
+    assert json.loads(msg.tool_calls[0].function.arguments) == sent
+
+
 @pytest.mark.parametrize("platform", ["desktop", "acp"])
 def test_interactive_platforms_keep_warning_only_default(platform):
     agent = _make_agent("web_search", platform=platform)

@@ -444,6 +444,10 @@ _PER_TURN_RESET_STATE: Tuple[Tuple[str, Any], ...] = (
     ("_tool_guardrail_halt_decision", None), ("_vision_supported", True),
     ("_iteration_budget_warning_injected", False),
     ("_run_budget_wrapup_injected", False), ("_verification_stop_nudges", 0),
+    ("_force_toolless_final", False), ("_final_synthesis_notice_injected", False),
+    ("_final_synthesis_deadline", None),
+    ("_capability_only_turn", False),
+    ("_vague_recent_turn", False),
     ("_pre_verify_nudges", 0),
 )
 
@@ -851,6 +855,15 @@ def build_turn_context(
 
     # Preserve the original user message (no nudge injection).
     original_user_message = persist_user_message if persist_user_message is not None else user_message
+    from agent.tool_guardrails import is_capability_only_request, is_vague_recent_request
+    agent._capability_only_turn = is_capability_only_request(original_user_message)
+    agent._vague_recent_turn = is_vague_recent_request(original_user_message)
+    set_capability_only = getattr(agent._tool_guardrails, "set_capability_only", None)
+    if callable(set_capability_only):
+        set_capability_only(agent._capability_only_turn)
+    set_vague_recent = getattr(agent._tool_guardrails, "set_vague_recent", None)
+    if callable(set_vague_recent):
+        set_vague_recent(agent._vague_recent_turn)
     should_review_memory = _tick_memory_nudge(agent)
     _emit_reaction(agent, original_user_message)
 
