@@ -11,10 +11,13 @@ class _NonStreamRequest:
     """
 
     def __init__(self, agent, api_kwargs: dict):
+        from agent.run_budget import ProviderWaitLifecycle
+
         self.agent = agent
         self.api_kwargs = api_kwargs
         self.result = {"response": None, "error": None}
         self.clients = h._RequestClientRegistry(agent)
+        self.wait_lifecycle = ProviderWaitLifecycle(agent)
         # Request-local cancel flag: agent._interrupt_requested is cleared at turn
         # boundaries but this daemon worker can outlive the turn, so it must know THIS
         # request was force-closed and not surface the transport error as a bug (#6600).
@@ -218,37 +221,17 @@ class _NonStreamRequest:
         self._await_worker_after_kill(
             f"Non-streaming API call timed out after {int(elapsed)}s with no response (threshold: {int(wd.stale_timeout)}s)"
             + (f". {silent_hint}" if silent_hint else ""))
-        if getattr(agent, "run_budget_seconds", None):
-            from agent.run_budget import ProviderStaleTimeout
-            self.result["error"] = ProviderStaleTimeout(
-                f"Provider produced no response for {int(wd.stale_timeout)}s"
-            )
+        if self.wait_lifecycle.abort_on_provider_stale(wd.stale_timeout):
+            self.result["error"] = self.wait_lifecycle.error()
 
-    def _run_budget_kill(self) -> None:
-        """Abort this request at the turn's absolute wall-clock deadline."""
-        from agent.run_budget import RunBudgetExceeded
-
+    def _wait_deadline_kill(self, reason: str) -> None:
+        """Apply the bounded owner's winning deadline to this transport."""
+        self.wait_lifecycle.abort(reason)
         self.cancelled = True
-        self._abort_request("run_budget_exhausted")
-        self._await_worker_after_kill(
-            "Conversation run budget expired while waiting for the provider"
-        )
-        self.result["error"] = RunBudgetExceeded(
-            "Conversation run budget expired while waiting for the provider"
-        )
-
-    def _final_synthesis_kill(self) -> None:
-        """Abort a live provider call that outlived the tool-free final deadline."""
-        from agent.run_budget import FinalSynthesisTimeout
-
-        self.cancelled = True
-        self._abort_request("final_synthesis_timeout")
-        self._await_worker_after_kill(
-            "The provider did not finish the tool-free final response within its deadline"
-        )
-        self.result["error"] = FinalSynthesisTimeout(
-            "The provider did not finish the tool-free final response within its deadline"
-        )
+        self._abort_request(reason)
+        error = self.wait_lifecycle.error()
+        self._await_worker_after_kill(str(error))
+        self.result["error"] = error
 
     def _interrupt(self, elapsed: float) -> None:
         agent = self.agent
@@ -288,15 +271,9 @@ class _NonStreamRequest:
             now = h.time.time()
             elapsed = now - self.call_start
             self._emit_wait_notice(elapsed, heartbeat=poll_count % 100 == 0)
-            from agent.run_budget import remaining_run_budget_seconds
-            remaining = remaining_run_budget_seconds(agent, now=now)
-            if remaining is not None and remaining <= 0:
-                self._run_budget_kill()
-                break
-            from agent.run_budget import remaining_final_synthesis_seconds
-            final_remaining = remaining_final_synthesis_seconds(agent, now=now)
-            if final_remaining is not None and final_remaining <= 0:
-                self._final_synthesis_kill()
+            deadline_reason = self.wait_lifecycle.expired_deadline(now=now)
+            if deadline_reason is not None:
+                self._wait_deadline_kill(deadline_reason)
                 break
             last_event_ts, last_progress_ts, retry_started_ts = self._codex_watchdog_snapshot()
             retry_ttfb_elapsed = now - retry_started_ts if retry_started_ts is not None else None

@@ -415,9 +415,8 @@ def begin_iteration(
     # tool call on the last round consumes the budget and the loop exits before
     # the model ever sees its result or can produce an answer.
     if agent.iteration_budget.remaining == 0:
-        agent._force_toolless_final = True
-        from agent.run_budget import arm_final_synthesis_deadline
-        arm_final_synthesis_deadline(agent)
+        from agent.run_budget import enter_final_synthesis
+        enter_final_synthesis(agent)
     return _verdict("fallthrough")
 
 

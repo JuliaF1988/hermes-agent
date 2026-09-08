@@ -1236,9 +1236,8 @@ class AIAgent(
         if decision.action in {"warn", "halt"}:
             function_result = append_toolguard_guidance(function_result, decision)
         elif decision.action == "finalize":
-            self._force_toolless_final = True
-            from agent.run_budget import arm_final_synthesis_deadline
-            arm_final_synthesis_deadline(self)
+            from agent.run_budget import enter_final_synthesis
+            enter_final_synthesis(self)
             function_result = (function_result or "") + (
                 "\n\n[Hermes final-synthesis guard: " + decision.message + "]"
             )
@@ -1260,10 +1259,9 @@ class AIAgent(
 
     def _guardrail_block_result(self, decision: ToolGuardrailDecision) -> str:
         self._set_tool_guardrail_halt(decision)
-        if decision.action in {"reuse", "restrict"}:
-            self._force_toolless_final = True
-            from agent.run_budget import arm_final_synthesis_deadline
-            arm_final_synthesis_deadline(self)
+        if decision.action == "reuse":
+            from agent.run_budget import enter_final_synthesis
+            enter_final_synthesis(self)
         return toolguard_synthetic_result(decision)
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:

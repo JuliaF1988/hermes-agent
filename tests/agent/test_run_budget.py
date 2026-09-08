@@ -412,3 +412,52 @@ def test_forced_final_request_disables_reasoning_and_caps_output():
     assert agent._ephemeral_reasoning_off is True
     assert agent._ephemeral_max_output_tokens == 2048
     assert 0 < agent._final_synthesis_deadline - time.time() <= 120.0
+
+
+def test_provider_wait_lifecycle_owns_deadline_precedence_and_typed_abort():
+    from agent.run_budget import (
+        FINAL_SYNTHESIS_TIMEOUT,
+        RUN_BUDGET_EXHAUSTED,
+        FinalSynthesisTimeout,
+        ProviderWaitLifecycle,
+        RunBudgetExceeded,
+    )
+
+    class Agent:
+        run_budget_seconds = 300
+        _run_budget_started_at = 900.0
+        _final_synthesis_deadline = 1100.0
+
+    lifecycle = ProviderWaitLifecycle(Agent())
+    assert lifecycle.expired_deadline(now=1050.0) is None
+    assert lifecycle.expired_deadline(now=1150.0) == FINAL_SYNTHESIS_TIMEOUT
+    assert lifecycle.expired_deadline(now=1250.0) == RUN_BUDGET_EXHAUSTED
+
+    assert lifecycle.abort(FINAL_SYNTHESIS_TIMEOUT) is True
+    assert lifecycle.abort(RUN_BUDGET_EXHAUSTED) is False
+    assert isinstance(lifecycle.error(), FinalSynthesisTimeout)
+
+    run_lifecycle = ProviderWaitLifecycle(Agent())
+    assert run_lifecycle.abort(RUN_BUDGET_EXHAUSTED) is True
+    assert isinstance(run_lifecycle.error(), RunBudgetExceeded)
+
+
+def test_provider_wait_lifecycle_stale_is_terminal_only_for_bounded_turns():
+    from agent.run_budget import ProviderStaleTimeout, ProviderWaitLifecycle
+
+    bounded = type("Agent", (), {
+        "run_budget_seconds": 30,
+        "_run_budget_started_at": time.time(),
+        "_final_synthesis_deadline": None,
+    })()
+    lifecycle = ProviderWaitLifecycle(bounded)
+    assert lifecycle.abort_on_provider_stale(4.9) is True
+    assert isinstance(lifecycle.error(), ProviderStaleTimeout)
+    assert "4s" in str(lifecycle.error())
+
+    unbounded = type("Agent", (), {
+        "run_budget_seconds": None,
+        "_run_budget_started_at": None,
+        "_final_synthesis_deadline": None,
+    })()
+    assert ProviderWaitLifecycle(unbounded).abort_on_provider_stale(4.9) is False

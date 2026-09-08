@@ -28,6 +28,11 @@ from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import (FailoverReason, PROVIDER_STREAM_NON_JSON_ERROR_CODE)
 from agent.errors import EmptyStreamError
 from agent.chat_completion_stream_monitor import StreamingWaitMonitor
+from agent.run_budget import (
+    FINAL_SYNTHESIS_TIMEOUT,
+    PROVIDER_STALE_TIMEOUT,
+    ProviderWaitLifecycle,
+)
 from agent.fast_mode import effective_request_overrides
 from agent.turn_context import substitute_api_content
 from agent.gemini_native_adapter import is_native_gemini_base_url
@@ -2526,9 +2531,7 @@ class _StreamingCall(StreamingWaitMonitor):
         # Shared by the socket read timeout (``_stream_timeouts``) and the stale
         # detector (``_resolve_stale_timeout``); None until resolved.
         self._stream_stale_timeout = None
-        self._run_budget_expired = False
-        self._final_synthesis_expired = False
-        self._stale_killed = False
+        self._wait_lifecycle = ProviderWaitLifecycle(agent)
         self.stream_attempt_lock = threading.Lock()
         self.stream_attempt_state = {"current": 0, "cancelled": set(), "discarded_chunks": 0, "discarded_bytes": 0}
         self.managed_stream_holder = {"stream": None}
@@ -3089,11 +3092,8 @@ class _StreamingCall(StreamingWaitMonitor):
         if self._request_cancelled["value"]:
             logger.debug("Streaming worker caught %s after request cancellation — exiting without retry.", type(e).__name__)
             return False
-        if self._stale_killed and getattr(self.agent, "run_budget_seconds", None):
-            from agent.run_budget import ProviderStaleTimeout
-            self.result["error"] = ProviderStaleTimeout(
-                f"Provider produced no stream output for {int(self._stream_stale_timeout)}s"
-            )
+        if self._wait_lifecycle.is_aborted_for(PROVIDER_STALE_TIMEOUT):
+            self.result["error"] = self._wait_lifecycle.error()
             return False
         _is_timeout = isinstance(e, (_httpx.ReadTimeout, _httpx.ConnectTimeout, _httpx.PoolTimeout))
         _is_conn_err = isinstance(e, (_httpx.ConnectError, _httpx.RemoteProtocolError, ConnectionError))
@@ -3201,7 +3201,9 @@ class _StreamingCall(StreamingWaitMonitor):
         self.agent._buffer_status(
             f"⚠️ No response from provider for {int(elapsed)}s (model: {self.api_kwargs.get('model', 'unknown')}, "
             f"context: ~{_est_ctx:,} tokens). Reconnecting...")
-        self._stale_killed = True
+        bounded_stale = self._wait_lifecycle.abort_on_provider_stale(
+            self._stream_stale_timeout
+        )
         with contextlib.suppress(Exception):
             self._cancel_current_stream_attempt("stale_stream_kill")
             self.clients.close_once("stale_stream_kill")
@@ -3210,39 +3212,26 @@ class _StreamingCall(StreamingWaitMonitor):
         self.last_chunk_time["t"] = time.time()
         self.agent._emit_wait_notice(f"⚠ no output from provider for {int(elapsed)}s — reconnecting...")
         self.agent._touch_activity(f"stale stream detected after {int(elapsed)}s, reconnecting")
-        if getattr(self.agent, "run_budget_seconds", None):
+        if bounded_stale:
             # A bounded interactive run must not spend another stale window in
             # the stream worker's internal retry loop. Publish the terminal
             # result from the monitor thread, then retire the worker's attempt.
-            from agent.run_budget import ProviderStaleTimeout
-            self.result["error"] = ProviderStaleTimeout(
-                f"Provider produced no stream output for {int(self._stream_stale_timeout)}s"
-            )
             self._request_cancelled["value"] = True
             if self.worker is not None:
                 self.worker.join(timeout=2.0)
             return True
         return False
 
-    def _abort_for_run_budget(self) -> None:
-        """Stop the current request once the turn's absolute wall-clock deadline wins."""
-        self._run_budget_expired = True
+    def _abort_for_wait_deadline(self, reason: str) -> None:
+        """Apply the bounded owner's winning deadline to this transport."""
+        self._wait_lifecycle.abort(reason)
         self._request_cancelled["value"] = True
-        self._cancel_current_stream_attempt("run_budget_exhausted")
+        self._cancel_current_stream_attempt(reason)
         with contextlib.suppress(Exception):
-            self.clients.close_once("run_budget_exhausted")
+            self.clients.close_once(reason)
         if self.worker is not None:
-            _join_worker_for_relay_teardown(self.worker, label="Streaming")
-
-    def _abort_for_final_synthesis_timeout(self) -> None:
-        """Stop a live-but-nonfinal stream at the absolute synthesis deadline."""
-        self._final_synthesis_expired = True
-        self._request_cancelled["value"] = True
-        self._cancel_current_stream_attempt("final_synthesis_timeout")
-        with contextlib.suppress(Exception):
-            self.clients.close_once("final_synthesis_timeout")
-        if self.worker is not None:
-            _join_worker_for_relay_teardown(self.worker, label="Final synthesis streaming")
+            label = "Final synthesis streaming" if reason == FINAL_SYNTHESIS_TIMEOUT else "Streaming"
+            _join_worker_for_relay_teardown(self.worker, label=label)
 
     def _abort_for_interrupt(self, stale_elapsed: float) -> None:
         """/stop seen by the monitor: mark cancelled, abort the request-local
@@ -3285,14 +3274,12 @@ class _StreamingCall(StreamingWaitMonitor):
                 if isinstance(_v, (int, float)):
                     _local_default = float(_v)
             timeout = env_float("HERMES_LOCAL_STREAM_STALE_TIMEOUT", _local_default)
-            from agent.run_budget import cap_timeout_to_run_budget
-            self._stream_stale_timeout = cap_timeout_to_run_budget(self.agent, timeout)
+            self._stream_stale_timeout = self._wait_lifecycle.cap_provider_timeout(timeout)
             logger.debug("Local provider detected (%s) — stale stream timeout set to %.0fs",
                 self.agent.base_url, self._stream_stale_timeout)
             return
         timeout = base if configured is not None or env_configured else _cloud_stale_timeout(base, self.api_kwargs)
-        from agent.run_budget import cap_timeout_to_run_budget
-        self._stream_stale_timeout = cap_timeout_to_run_budget(self.agent, timeout)
+        self._stream_stale_timeout = self._wait_lifecycle.cap_provider_timeout(timeout)
 
     def _partial_stream_stub(self):
         """Tokens already reached the platform: a finish_reason="length" stub fires the
@@ -3357,14 +3344,9 @@ class _StreamingCall(StreamingWaitMonitor):
             self._monitor_loop()
         if self._monitor_interrupted["yes"]:
             raise InterruptedError("Agent interrupted during streaming API call")
-        if self._run_budget_expired:
-            from agent.run_budget import RunBudgetExceeded
-            raise RunBudgetExceeded("Conversation run budget expired while waiting for the provider")
-        if self._final_synthesis_expired:
-            from agent.run_budget import FinalSynthesisTimeout
-            raise FinalSynthesisTimeout(
-                "The provider did not finish the tool-free final response within its deadline"
-            )
+        lifecycle_error = self._wait_lifecycle.error()
+        if lifecycle_error is not None:
+            raise lifecycle_error
         if self.agent._interrupt_requested:  # worker returned early before the monitor saw the flag
             raise InterruptedError("Agent interrupted during streaming API call (post-worker)")
         if self.result["error"] is not None:

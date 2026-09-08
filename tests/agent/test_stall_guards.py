@@ -102,6 +102,34 @@ def test_composite_coverage_does_not_promote_nested_secondary_ids():
     ).allows_execution is True
 
 
+def test_composite_coverage_preserves_typed_id_namespaces_and_aliases():
+    c = ToolCallGuardrailController()
+    c.after_call(
+        "mcp_example__investigate_finding",
+        {"finding_id": "7"},
+        json.dumps({
+            "structuredContent": {
+                "resultState": "assembled",
+                "componentFollowupNeeded": False,
+                "includes": {"device-detail": True, "finding_detail": True},
+                "findingId": "7",
+                "deviceID": "2",
+            },
+        }),
+        failed=False,
+    )
+
+    assert c.before_call(
+        "mcp_example__get_device_detail", {"device_id": "7"}
+    ).allows_execution is True
+    assert c.before_call(
+        "mcp_example__get_device_detail", {"device-id": "2"}
+    ).action == "reuse"
+    assert c.before_call(
+        "mcp_example__get_finding_detail", {"finding-id": "7"}
+    ).action == "reuse"
+
+
 def test_assembled_mcp_result_arms_toolless_final_synthesis():
     agent = _fake_agent()
     result = json.dumps({
@@ -159,10 +187,13 @@ def test_capability_only_intent_requires_capability_and_no_investigation():
 
 
 def test_vague_recent_mcp_args_are_bounded_but_explicit_ranges_are_not():
-    from agent.tool_guardrails import is_vague_recent_request
+    from agent.tool_guardrails import is_vague_recent_request, recent_request_provenance
 
     assert is_vague_recent_request("Untersuche ungewöhnliche Aktivität in letzter Zeit") is True
     assert is_vague_recent_request("Investigate recent activity from the last 48 hours") is False
+    explicit_count = recent_request_provenance("show the 50 most recent findings")
+    assert explicit_count.quantity_source == "user"
+    assert explicit_count.range_source == "model_or_default"
 
     c = ToolCallGuardrailController()
     c.set_vague_recent(True)

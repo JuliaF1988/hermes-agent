@@ -81,7 +81,7 @@ class TestStreamStaleCircuitBreaker:
             fired.append(True)
             call._call_done.set()
 
-        monkeypatch.setattr(call, "_abort_for_final_synthesis_timeout", abort)
+        monkeypatch.setattr(call, "_abort_for_wait_deadline", lambda _reason: abort())
         call._monitor_loop()
         assert fired == [True]
 

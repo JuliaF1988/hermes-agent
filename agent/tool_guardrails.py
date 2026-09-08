@@ -203,6 +203,28 @@ class ToolGuardrailDecision:
         return data
 
 
+@dataclass(frozen=True)
+class RecentRequestProvenance:
+    """Origin of recent-request bounds carried from user text to dispatch.
+
+    Tool arguments alone cannot distinguish a number copied from the request
+    from one invented by the model.  Preserve that authority boundary before
+    the model call and consult it when normalizing emitted MCP arguments.
+    """
+
+    is_recent: bool = False
+    quantity_source: str = "model_or_default"
+    range_source: str = "model_or_default"
+
+    @property
+    def is_vague(self) -> bool:
+        return (
+            self.is_recent
+            and self.quantity_source != "user"
+            and self.range_source != "user"
+        )
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -318,7 +340,7 @@ class ToolCallGuardrailController:
         self._reusable_mcp_calls: set[ToolCallSignature] = set()
         self._mcp_composite_coverage: list[_CompositeCoverage] = []
         self._capability_only = False
-        self._vague_recent = False
+        self._recent_request = RecentRequestProvenance()
         self._turn_web_search_count = 0
         self._turn_subagent_count = 0
 
@@ -327,19 +349,28 @@ class ToolCallGuardrailController:
         self._capability_only = bool(enabled)
 
     def set_vague_recent(self, enabled: bool) -> None:
-        """Enable conservative MCP bounds for an unqualified recent-time request."""
-        self._vague_recent = bool(enabled)
+        """Compatibility shim for callers without request-bound provenance."""
+        self._recent_request = RecentRequestProvenance(is_recent=bool(enabled))
+
+    def set_recent_request_provenance(self, provenance: RecentRequestProvenance) -> None:
+        """Carry user/default ownership of recent-request bounds into dispatch."""
+        self._recent_request = (
+            provenance if isinstance(provenance, RecentRequestProvenance)
+            else RecentRequestProvenance()
+        )
 
     def normalize_args(self, tool_name: str, args: Mapping[str, Any] | None) -> Mapping[str, Any]:
         """Bound vague-recent MCP reads before dispatch; explicit user ranges are excluded."""
         original = _coerce_args(args)
         server, _component = _mcp_tool_parts(tool_name)
-        if not self._vague_recent or server is None:
+        provenance = self._recent_request
+        if not provenance.is_recent or server is None:
             return original
         normalized = dict(original)
         count = normalized.get("count")
-        if ((isinstance(count, (int, float)) and not isinstance(count, bool) and count > 10)
-                or (isinstance(count, str) and count.strip().isdigit() and int(count) > 10)):
+        if (provenance.quantity_source != "user" and (
+                (isinstance(count, (int, float)) and not isinstance(count, bool) and count > 10)
+                or (isinstance(count, str) and count.strip().isdigit() and int(count) > 10))):
             normalized["count"] = 10
         start, end = normalized.get("start"), normalized.get("end")
         parsed_start, parsed_end = _parse_timestamp(start), _parse_timestamp(end)
@@ -350,7 +381,7 @@ class ToolCallGuardrailController:
             )
         except TypeError:  # mixed naive/aware timestamps: leave untouched for schema validation
             oversized_window = False
-        if oversized_window:
+        if oversized_window and provenance.range_source != "user":
             normalized["start"] = _format_timestamp_like(parsed_end - timedelta(hours=24), start)
         return normalized
 
@@ -533,13 +564,13 @@ class ToolCallGuardrailController:
             # object (plus the composite call's IDs). Recursing through every
             # evidence row would falsely treat a secondary device as the primary
             # entity whose detail the composite says it included.
-            native_ids = frozenset({
-                *_native_id_values(mapping, recursive=False),
-                *_native_id_values(args, recursive=False),
+            native_identities = frozenset({
+                *_native_identities(mapping, recursive=False),
+                *_native_identities(args, recursive=False),
             })
             scope_values = frozenset(_scope_values(args))
             self._mcp_composite_coverage.append(
-                _CompositeCoverage(server, components, native_ids, scope_values)
+                _CompositeCoverage(server, components, native_identities, scope_values)
             )
             return True
         return False
@@ -549,14 +580,14 @@ class ToolCallGuardrailController:
         if server is None or component is None:
             return False
         normalized = _normalize_component_name(component)
-        call_ids = set(_native_id_values(args))
-        if not call_ids:
+        call_identities = set(_native_identities(args))
+        if not call_identities:
             return False
         call_scope = set(_scope_values(args))
         for coverage in self._mcp_composite_coverage:
             if coverage.server != server or normalized not in coverage.components:
                 continue
-            if not call_ids.intersection(coverage.native_ids):
+            if not call_identities.intersection(coverage.native_identities):
                 continue
             # An explicitly changed time bound is a changed scope and remains allowed.
             if call_scope and not call_scope.issubset(coverage.scope_values):
@@ -699,7 +730,7 @@ def _result_hash(result: str | None) -> str:
 class _CompositeCoverage:
     server: str
     components: frozenset[str]
-    native_ids: frozenset[str]
+    native_identities: frozenset[tuple[str, str]]
     scope_values: frozenset[str]
 
 
@@ -746,21 +777,42 @@ def is_capability_only_request(value: Any) -> bool:
 
 def is_vague_recent_request(value: Any) -> bool:
     """True for a recent-time ask only when the user supplied no concrete bound."""
+    return recent_request_provenance(value).is_vague
+
+
+def recent_request_provenance(value: Any) -> RecentRequestProvenance:
+    """Classify recent bounds while retaining whether the user supplied them."""
     text = _request_text(value)
     if not text:
-        return False
+        return RecentRequestProvenance()
     normalized = " ".join(text.casefold().split())
     recent_markers = (
-        "recent", "lately", "latest activity", "in letzter zeit", "kürzlich", "kuerzlich", "aktuell",
+        "recent", "lately", "latest", "newest", "in letzter zeit", "kürzlich",
+        "kuerzlich", "aktuell", "neuest", "letzten",
     )
     if not any(marker in normalized for marker in recent_markers):
-        return False
-    explicit_bound = re.search(
-        r"\b\d{4}-\d{2}-\d{2}\b|\b\d+(?:[.,]\d+)?\s*(?:h|hours?|stunden?|d|days?|tage?n?)\b|"
-        r"\bcount\s*[=:]?\s*\d+\b",
+        return RecentRequestProvenance()
+    explicit_quantity = re.search(
+        r"\bcount\s*[=:]?\s*\d+\b|"
+        r"\b(?:show|list|display|return|get|fetch)\s+(?:me\s+)?(?:the\s+)?\d+\b|"
+        r"\bgive\s+me\s+(?:the\s+)?\d+\b|"
+        r"\b(?:top|latest|newest|recent|most\s+recent)\s+\d+\b|"
+        r"\b\d+\s+(?:most\s+recent|recent|latest|newest|neuest\w*|aktuell\w*|letzte\w*)\b|"
+        r"\b\d+\s+(?:findings?|items?|results?|events?|records?|alerts?|devices?)\b",
         normalized,
     )
-    return explicit_bound is None
+    explicit_range = re.search(
+        r"\b\d{4}-\d{2}-\d{2}\b|"
+        r"\b\d+(?:[.,]\d+)?\s*(?:h|hours?|stunden?|d|days?|tage?n?|weeks?|wochen?|months?|monate?n?)\b|"
+        r"\b(?:today|yesterday|heute|gestern)\b|"
+        r"\b(?:since|until|from|between|seit|bis|zwischen)\b",
+        normalized,
+    )
+    return RecentRequestProvenance(
+        is_recent=True,
+        quantity_source="user" if explicit_quantity else "model_or_default",
+        range_source="user" if explicit_range else "model_or_default",
+    )
 
 
 def _request_text(value: Any) -> str:
@@ -819,8 +871,8 @@ def _normalize_component_name(value: str) -> str:
     return normalized
 
 
-def _native_id_values(value: Any, *, recursive: bool = True):
-    """Yield scalar values whose field name denotes an exact native identifier."""
+def _native_identities(value: Any, *, recursive: bool = True):
+    """Yield normalized ``(field namespace, value)`` native identities."""
     if not isinstance(value, Mapping):
         return
     for key, child in value.items():
@@ -833,13 +885,13 @@ def _native_id_values(value: Any, *, recursive: bool = True):
             or (len(raw_key) > 2 and raw_key.endswith(("Id", "ID")))
         )
         if is_id_key and isinstance(child, (str, int)) and not isinstance(child, bool):
-            yield str(child)
+            yield normalized, str(child)
         if recursive and isinstance(child, Mapping):
-            yield from _native_id_values(child, recursive=True)
+            yield from _native_identities(child, recursive=True)
         elif recursive and isinstance(child, list):
             for item in child:
                 if isinstance(item, Mapping):
-                    yield from _native_id_values(item, recursive=True)
+                    yield from _native_identities(item, recursive=True)
 
 
 def _scope_values(args: Mapping[str, Any]):
