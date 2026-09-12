@@ -20,6 +20,12 @@ get_system_status, close/reconnect, repeat a read. No writes during discovery.
 MCP `ping` is supported; GET /mcp may return 405 (no unsolicited SSE stream).
 `skip_preflight` avoids mistaking that intentional response for a broken API.
 
+Use a Hermes build with the generic unknown-write-outcome guard in this PR.
+Only tools declaring `readOnlyHint=true` may be retried after a transport loss;
+mutations return `outcome=unknown, replayed=false` and require authoritative
+reread. Explicit authentication rejection retains the normal OAuth recovery.
+This applies to ordinary MCP, not a UniversalPipeline-specific client.
+
 Read-only role exercises: system/ETA, find transcript→status, document blocker,
 hosts, replay uncertainty, adaptive reasons. Writes require explicit operator
 intent: priority roundtrip, drain naturally complete, bounded policy roundtrip,

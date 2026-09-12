@@ -14,7 +14,7 @@ seconds later. Both fast-fail sites now respawn AND retry once:
 - pre-call gate (children already dead when the call arrives);
 - mid-call watcher race (children die while the RPC is in flight).
 
-Both must recover transparently, and both must stop after ONE retry so a
+Both must recover transparently for declared read-only tools, and both must stop after ONE retry so a
 server that keeps dying parks via run()'s rapid-drop budget instead of
 hot-cycling respawns forever. The error text must never claim a timeout —
 that wording is what misdirected the original investigation.
@@ -77,6 +77,7 @@ def _install_stub_server(mcp_tool_module, name: str, call_tool_impl,
     server._stdio_children_dead = children_dead
 
     mcp_tool_module._servers[name] = server
+    mcp_tool_module._tool_read_only_hints[name] = {"tool1": True}
     mcp_tool_module._server_error_counts.pop(name, None)
     if hasattr(mcp_tool_module, "_server_breaker_opened_at"):
         mcp_tool_module._server_breaker_opened_at.pop(name, None)
@@ -85,6 +86,7 @@ def _install_stub_server(mcp_tool_module, name: str, call_tool_impl,
 
 def _cleanup(mcp_tool_module, name: str) -> None:
     mcp_tool_module._servers.pop(name, None)
+    mcp_tool_module._tool_read_only_hints.pop(name, None)
     mcp_tool_module._server_error_counts.pop(name, None)
     if hasattr(mcp_tool_module, "_server_breaker_opened_at"):
         mcp_tool_module._server_breaker_opened_at.pop(name, None)

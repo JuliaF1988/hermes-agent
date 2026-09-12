@@ -443,9 +443,28 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         def _on_failure(exc):
             _core._bump_server_error(server_name)
             logger.error("MCP tool %s/%s call failed: %s", server_name, tool_name, exc)
+
+        def _unknown_write_outcome(name, exc, retry_call, description):
+            # A closed transport/session does not prove that a mutation was rejected.
+            # Reconnect is safe; repeating the call is not. Explicit HTTP/OAuth 401
+            # rejection retains the existing authentication recovery path.
+            if (_core._tool_read_only_hints.get(name, {}).get(tool_name) is True
+                    or _is_auth_error(exc)):
+                return None
+            _core._bump_server_error(name)
+            if _is_session_expired_error(exc) or isinstance(exc, _StdioChildExited):
+                _loop._signal_reconnect(server)
+            logger.warning("MCP write outcome unknown: %s/%s (%s); not replayed",
+                           name, tool_name, type(exc).__name__)
+            return tool_error(
+                "MCP call failed; mutation outcome is unknown. Do NOT repeat this call. Reconnect and read "
+                "authoritative state first; reconcile before any further mutation.",
+                outcome="unknown", replayed=False, server=name)
+
         return _dispatch(
             server_name, server, op, _call, tool_timeout,
-            (_handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry, _handle_session_expired_and_retry),
+            (_unknown_write_outcome, _handle_stdio_child_exited_and_retry,
+             _handle_auth_error_and_retry, _handle_session_expired_and_retry),
             _on_failure, record_outcome=True)
     return _handler
 
