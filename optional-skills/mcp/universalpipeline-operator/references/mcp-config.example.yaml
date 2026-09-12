@@ -1,0 +1,14 @@
+mcp_servers:
+  universalpipeline:
+    url: "${UP_MCP_URL}"
+    headers:
+      Authorization: "Bearer ${UP_MCP_TOKEN}"
+    enabled: true
+    protocol: legacy
+    skip_preflight: true
+    connect_timeout: 15
+    timeout: 30
+    supports_parallel_tool_calls: false
+    tools:
+      resources: false
+      prompts: false

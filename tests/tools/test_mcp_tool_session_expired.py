@@ -182,6 +182,7 @@ def test_call_tool_handler_rebuilds_configured_server_transport(
             return await self._serve_transport("http", config)
 
     server = _LifecycleTask("resumed")
+    monkeypatch.setitem(mcp_tool._tool_read_only_hints, "resumed", {"health": True})
     mcp_tool._servers["resumed"] = server
     mcp_tool._server_error_counts.pop("resumed", None)
     mcp_tool._server_breaker_opened_at.pop("resumed", None)
@@ -228,6 +229,7 @@ def test_session_expired_retry_waits_for_new_session(monkeypatch, tmp_path):
     _mcp_loop._ensure_mcp_loop()
     server = MagicMock()
     server.name = "hindsight"
+    monkeypatch.setitem(mcp_tool._tool_read_only_hints, "hindsight", {"get_bank": True})
     ready_flag = threading.Event()
     ready_flag.set()
 
