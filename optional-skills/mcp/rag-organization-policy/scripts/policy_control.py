@@ -177,10 +177,13 @@ def status(control_dir: Path, *, include_all: bool = False) -> dict[str, Any]:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "wb") as handle:
+            if os.name != "nt":
+                os.fchmod(handle.fileno(), mode)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import stat
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,7 @@ def test_apply_is_atomic_revision_checked_and_preserves_unrelated_rules(tmp_path
         }
     )
     _write_yaml(control / "organization-policy.yaml", current)
+    (control / "organization-policy.yaml").chmod(0o660)
     recommendations_path = control / "organization-recommendations.json"
     recommendations_path.write_text(
         json.dumps({"schema": "rag.organization-recommendations.v1", "recommendations": []}),
@@ -129,6 +131,7 @@ def test_apply_is_atomic_revision_checked_and_preserves_unrelated_rules(tmp_path
 
     assert result["policyRevision"] == 2
     assert module.load_policy(control / "organization-policy.yaml") == candidate
+    assert stat.S_IMODE((control / "organization-policy.yaml").stat().st_mode) == 0o660
     assert module.load_policy(control / ".history" / result["historyFile"]) == current
     assert all(source.parent == target.parent for source, target in replacements)
     assert {rule["id"] for rule in candidate["rules"]} >= {"invoices-flat", "payslips-flat"}
