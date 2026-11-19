@@ -18,6 +18,7 @@ import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
+from agent.redact_auth import redact_authorization_payload, redact_authorization_text
 from tools.registry import CHECK_FN_CACHE_BYPASS, check_fn_cache_scope, discover_builtin_tools, registry, tool_error
 from tools.registry import _MAX_TOOL_ERROR_CHARS as _TOOL_ERROR_MAX_LEN
 from toolsets import resolve_toolset, validate_toolset
@@ -572,7 +573,7 @@ def _sanitize_tool_error(error_msg: str) -> str:
     """Strip structural framing tokens from a tool error before the model sees it."""
     if not error_msg:
         return "[TOOL_ERROR] "
-    sanitized = error_msg
+    sanitized = redact_authorization_text(error_msg)
     for pattern in _TOOL_ERROR_STRIP_RES:
         sanitized = pattern.sub("", sanitized)
     if len(sanitized) > _TOOL_ERROR_MAX_LEN:
@@ -824,6 +825,9 @@ def handle_function_call(
 
     def _emit(result: Any, **extra: Any) -> Any:
         """Emit post_tool_call with this call's identity fields; returns *result*."""
+        result = redact_authorization_payload(result)
+        if isinstance(extra.get("error_message"), str):
+            extra["error_message"] = redact_authorization_text(extra["error_message"])
         _emit_post_tool_call_hook(function_name=function_name, function_args=function_args, result=result,
                                   **asdict(ids), middleware_trace=list(trace), **extra)
         return result
@@ -869,12 +873,14 @@ def handle_function_call(
         result = _execute_tool(function_name, function_args, original_args, ids, user_task=user_task,
                                enabled_tools=enabled_tools, skip_tool_execution_middleware=skip_tool_execution_middleware)
         duration_ms = _elapsed_ms(start)
-        _emit(result, duration_ms=duration_ms)
-        return _apply_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids)
+        result = _emit(result, duration_ms=duration_ms)
+        return redact_authorization_payload(
+            _apply_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids)
+        )
 
     except Exception as e:
         error_msg = f"Error executing {function_name}: {str(e)}"
-        logger.exception(error_msg)
+        logger.error("%s", redact_authorization_text(error_msg))
         return _emit(tool_error(_sanitize_tool_error(error_msg)), duration_ms=_elapsed_ms(start),
                      status="error", error_type=type(e).__name__, error_message=str(e))
 

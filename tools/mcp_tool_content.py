@@ -6,6 +6,7 @@ import base64
 import logging
 import mimetypes
 from typing import Any, Dict, Optional, Tuple
+from agent.redact_auth import redact_authorization_text
 from tools.ansi_strip import strip_unicode_tags
 from tools.mcp_tool_common import mcp_field
 from tools.mcp_tool_schema import mcp_prefixed_tool_name
@@ -28,11 +29,8 @@ _MCP_RESOURCE_MAX_B64_CHARS = _MCP_RESOURCE_MAX_BYTES * 4 // 3 + 4
 
 
 def _truncate_mcp_text_result(text: str, max_chars: int = _MCP_HARD_RESULT_CAP_CHARS) -> str:
-    """Pass text at or under ``max_chars`` unchanged; otherwise keep a 40% head / 60% tail
-    split with an omission notice between.
-
-    Bound pathological MCP text before it propagates (#56059).
-    """
+    """Redact authentication before applying the 40% head / 60% tail cap."""
+    text = redact_authorization_text(text)
     if len(text) <= max_chars:
         return text
     head_chars = int(max_chars * 0.4)

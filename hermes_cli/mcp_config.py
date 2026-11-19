@@ -2,11 +2,11 @@
 
 import asyncio
 import logging
-import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.redact_auth import redact_authorization_text
 from hermes_cli.config import (
     cfg_get,
     load_config,
@@ -18,8 +18,7 @@ from hermes_cli.config import (
 from hermes_cli.colors import Colors, color
 from hermes_constants import display_hermes_home
 from hermes_cli.mcp_security import validate_mcp_server_entry
-from tools.mcp_tool_config import _ENV_VAR_PATTERN
-from tools.mcp_tool_common import _env_ref_name
+from tools.mcp_tool_common import _sanitize_error
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +47,7 @@ def _confirm(question: str, default: bool = True) -> bool:
 
 def _print_tools(tools: List[Tuple[str, str]], width: int, desc_max: int) -> None:
     for tool_name, desc in tools:
+        desc = redact_authorization_text(desc)
         short = desc[:desc_max] + "..." if len(desc) > desc_max else desc
         print(f"    {color(tool_name, Colors.GREEN):{width}s} {short}")
 
@@ -284,7 +284,7 @@ def _probe_single_server(
         server = await asyncio.wait_for(_connect_server(name, config), timeout=connect_timeout)
         try:
             for t in server._tools:
-                desc = getattr(t, "description", "") or ""
+                desc = redact_authorization_text(getattr(t, "description", "") or "")
                 if len(desc) > 80:
                     desc = desc[:77] + "..."
                 tools_found.append((t.name, desc))
@@ -599,10 +599,7 @@ def cmd_mcp_test(args):
     elif headers:
         for k, v in headers.items():
             if isinstance(v, str) and ("key" in k.lower() or "auth" in k.lower()):
-                # Mask the value (accepts ${VAR} and Cursor-style ${env:VAR})
-                resolved = _ENV_VAR_PATTERN.sub(lambda m: os.getenv(_env_ref_name(m.group(1)), ""), v)
-                masked = resolved[:4] + "***" + resolved[-4:] if len(resolved) > 8 else "***"
-                print(f"    {k}: {masked}")
+                print(f"    {k}: ***")
     else:
         _info("Auth: none")
 
@@ -610,7 +607,7 @@ def cmd_mcp_test(args):
     try:
         tools = _probe_single_server(name, cfg)
     except Exception as exc:
-        _error(f"Connection failed ({(time.monotonic() - start) * 1000:.0f}ms): {exc}")
+        _error(f"Connection failed ({(time.monotonic() - start) * 1000:.0f}ms): {_sanitize_error(str(exc))}")
         return
     _success(f"Connected ({(time.monotonic() - start) * 1000:.0f}ms)")
     _success(f"Tools discovered: {len(tools)}")

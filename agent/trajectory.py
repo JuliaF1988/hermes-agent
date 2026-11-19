@@ -5,6 +5,8 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List
 
+from agent.redact_auth import redact_authorization_payload
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +26,7 @@ def save_trajectory(trajectory: List[Dict[str, Any]], model: str, completed: boo
     """Append a ShareGPT-format entry to a JSONL file (default trajectory_samples.jsonl / failed_trajectories.jsonl by ``completed``)."""
     if filename is None:
         filename = "trajectory_samples.jsonl" if completed else "failed_trajectories.jsonl"
-    entry = {"conversations": trajectory, "timestamp": datetime.now().isoformat(), "model": model, "completed": completed}
+    entry = {"conversations": redact_authorization_payload(trajectory), "timestamp": datetime.now().isoformat(), "model": model, "completed": completed}
     try:
         with open(filename, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")

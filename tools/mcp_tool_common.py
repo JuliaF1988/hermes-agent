@@ -7,6 +7,7 @@ import os
 import random
 import re
 from typing import Any, Optional
+from agent.redact_auth import redact_authorization_text
 
 logger = logging.getLogger("tools.mcp_tool")
 
@@ -70,7 +71,7 @@ def _jittered(seconds: float) -> float:
 # Credential patterns to strip from error messages: GitHub PAT, OpenAI-style key, Bearer token,
 # and ``token= / key= / API_KEY= / password= / secret=`` assignments.
 _CREDENTIAL_PATTERN = re.compile(
-    r"(?:ghp_[A-Za-z0-9_]{1,255}|sk-[A-Za-z0-9_]{1,255}|Bearer\s+\S+"
+    r"""(?:ghp_[A-Za-z0-9_]{1,255}|sk-[A-Za-z0-9_]{1,255}|\bBearer[ \t]+[^\s"']+"""
     r"|(?:token|key|API_KEY|password|secret)=[^\s&,;\"']{1,255})", re.IGNORECASE)
 
 
@@ -84,7 +85,7 @@ def _env_ref_name(ref: str) -> str:
 
 def _sanitize_error(text: str) -> str:
     """Replace credential-like patterns with [REDACTED] before text reaches the LLM."""
-    return _CREDENTIAL_PATTERN.sub("[REDACTED]", text)
+    return _CREDENTIAL_PATTERN.sub("[REDACTED]", redact_authorization_text(text))
 
 
 def _exc_str(exc: BaseException) -> str:
