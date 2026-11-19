@@ -30,6 +30,7 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.message_sanitization import coalesce_tool_call_id
+from agent.redact_auth import redact_authorization_payload, redact_authorization_text
 from agent.inline_tool_executors import (
     INLINE_TOOL_EXECUTORS,
     InlineToolContext,
@@ -1194,7 +1195,8 @@ class _ConcurrentBatch:
             return _ToolOutcome(ref, result, duration, True, False)
         except Exception as tool_error:
             result = f"Error executing tool '{ref.name}': {tool_error}"
-            logger.error("_invoke_tool raised for %s: %s", ref.name, tool_error, exc_info=True)
+            logger.error("_invoke_tool raised for %s: %s", ref.name, redact_authorization_text(str(tool_error)))
+        result = redact_authorization_payload(result)
         duration = time.time() - start
         if not blocked and not dispatched:
             ref.emit_post(agent, result, duration_ms=int(duration * 1000))
@@ -1587,7 +1589,7 @@ def _run_sequential_call(
             display_index=display_index,
         )
         ref.args = managed.args
-        _spinner_result = managed.result
+        _spinner_result = redact_authorization_payload(managed.result)
     except KeyboardInterrupt:
         if not dispatch.handles_keyboard_interrupt:
             raise
@@ -1603,7 +1605,7 @@ def _run_sequential_call(
         if dispatch.error_result is None:
             raise
         function_result = dispatch.error_result(tool_error)
-        logger.error(dispatch.error_log, ref.name, tool_error, exc_info=True)
+        logger.error(dispatch.error_log, ref.name, redact_authorization_text(str(tool_error)))
         managed = _ManagedToolResult(result=function_result, args=ref.args, middleware_trace=ref.trace, blocked=False, dispatched=False)
     finally:
         if dispatch.is_delegate:
@@ -1621,6 +1623,7 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
     result; False when the incremental flush failed (the caller must stop the batch)."""
     ref.args, ref.trace, function_result = managed.args, managed.middleware_trace, managed.result
     _execution_timed_out = isinstance(function_result, (_ToolTimeoutResult, _ToolCancelledResult))
+    function_result = redact_authorization_payload(function_result)
     # Multimodal dict results (_multimodal=True) are not sliceable as strings.
     _result_len = len(function_result) if isinstance(function_result, str) else len(str(function_result))
     _is_error_result, _ = _detect_tool_failure(ref.name, function_result)

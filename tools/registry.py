@@ -935,7 +935,10 @@ registry = ToolRegistry()
 def tool_error(message, **extra) -> str:
     """``'{"error": "<message>", **extra}'`` — the error body is bounded so a raw
     exception can't bloat history across retries."""
-    return json.dumps({"error": _bound_error_text(str(message)), **extra}, ensure_ascii=False)
+    from agent.redact_auth import redact_authorization_payload, redact_authorization_text
+
+    text = redact_authorization_text(str(message))
+    return json.dumps({"error": _bound_error_text(text), **redact_authorization_payload(extra)}, ensure_ascii=False)
 
 
 def tool_result(data=None, **kwargs) -> str:

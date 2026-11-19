@@ -10,6 +10,7 @@ import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from agent.redact_auth import redact_authorization_payload
 from tools.registry import tool_error
 from tools.ansi_strip import strip_unicode_tags
 from tools.mcp_tool_common import _exc_str, _sanitize_error, mcp_field, _core
@@ -376,7 +377,7 @@ def _capped_structured_content(result):
     # `modelcontextprotocol.io/...`, `tools.mcp.com/...`); those carry host/protocol plumbing, not
     # model-facing data. Unprefixed and vendor-namespaced keys (`com.example.mcp/...`) pass through — their
     # semantics belong to the server.
-    structured = mcp_field(result, "structured_content", "structuredContent")
+    structured = redact_authorization_payload(mcp_field(result, "structured_content", "structuredContent"))
     try:
         as_json = json.dumps(structured, ensure_ascii=False, default=str) if structured is not None else ""
     except (TypeError, ValueError):
@@ -395,7 +396,7 @@ def _render_call_tool_result(result, server_name: str) -> str:
         return tool_error(_sanitize_error(_truncate_mcp_text_result(_error_result_text(result) or "MCP tool returned an error")))
     text_result, usable_parts = _render_content_blocks(result, server_name)
     structured = _capped_structured_content(result)
-    meta = _strip_reserved_meta_keys(mcp_field(result, "meta", "meta"))
+    meta = redact_authorization_payload(_strip_reserved_meta_keys(mcp_field(result, "meta", "meta")))
     if structured is not None and usable_parts > 0:
         structured = None  # drop notices do not count as usable content
     if structured is None and meta is None:
@@ -442,7 +443,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
 
         def _on_failure(exc):
             _core._bump_server_error(server_name)
-            logger.error("MCP tool %s/%s call failed: %s", server_name, tool_name, exc)
+            logger.error("MCP tool %s/%s call failed: %s", server_name, tool_name, _sanitize_error(_exc_str(exc)))
 
         def _unknown_write_outcome(name, exc, retry_call, description):
             # A closed transport/session does not prove that a mutation was rejected.
@@ -485,11 +486,13 @@ def _make_utility_handler(op: str, log_label: str, rpc, render, required: Option
             async def _call():
                 async with server._rpc_lock:
                     result = await rpc(server.session, args, server_name)
-                return json.dumps(render(result, server_name), ensure_ascii=False)
+                return json.dumps(redact_authorization_payload(render(result, server_name)), ensure_ascii=False)
             return _dispatch(
                 server_name, server, op, _call, tool_timeout,
                 (_handle_auth_error_and_retry, _handle_session_expired_and_retry),
-                lambda exc: logger.error("MCP %s/%s failed: %s", server_name, log_label, exc))
+                lambda exc: logger.error(
+                    "MCP %s/%s failed: %s", server_name, log_label, _sanitize_error(_exc_str(exc))
+                ))
         return _handler
     return _factory
 

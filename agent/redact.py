@@ -14,6 +14,7 @@ from urllib.parse import unquote_plus
 # Shared with agent/file_safety's read-block list so the two defenses can't
 # drift: a blocked file_tools read that falls back to ``cat`` is still caught.
 from agent.file_safety import _BLOCKED_PROJECT_ENV_BASENAMES as _ENV_FILE_BASENAMES
+from agent.redact_auth import redact_authorization_text
 
 logger = logging.getLogger(__name__)
 
@@ -271,12 +272,6 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
 _JSON_KEY_NAMES = r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
 _JSON_FIELD_RE = re.compile(rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"', re.IGNORECASE)
-
-# Authorization / Proxy-Authorization, any scheme or bare credential; header
-# name and scheme word preserved. The credential class excludes quotes: pulling
-# a closing quote into the mask turns value corruption into SYNTAX corruption
-# (unterminated quote → shell EOF / SyntaxError).
-_AUTH_HEADER_RE = re.compile(r"((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s+)?([^\s\"']+)", re.IGNORECASE)
 
 # API-key style headers (single opaque value, no scheme word): non-vendor-prefix
 # values would otherwise leak when a curl command is echoed into tool output.
@@ -586,6 +581,7 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
     if not text or not (force or _REDACT_ENABLED):
         return text
     code_file = code_file or file_read
+    text = redact_authorization_text(text)
 
     # Control/zero-width chars can split a token body so _PREFIX_RE alone misses it.
     if _has_known_prefix_substring(text):
@@ -599,9 +595,6 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
 
     if not code_file:
         text = _redact_assignments(text)
-
-    if "uthorization" in text or "UTHORIZATION" in text:  # cheapest gate over every casing
-        text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + (m.group(2) or "") + _mask_token(m.group(3)), text)
 
     if ":" in text:
         text = _SECRET_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)), text)
